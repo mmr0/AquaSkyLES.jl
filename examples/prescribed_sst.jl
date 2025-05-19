@@ -115,7 +115,7 @@ Tₛ = reference_state.θ # K
 qᵢ(x, y, z) = 1e-2 + 1e-5 * rand()
 set!(model, θ=θᵢ, q=qᵢ)
 
-simulation = Simulation(model, Δt=10, stop_time=4hours)
+simulation = Simulation(model, Δt=10, stop_time=10minutes)
 conjure_time_step_wizard!(simulation, cfl=0.7)
 
 T = AquaSkyLES.TemperatureField(model)
@@ -123,11 +123,18 @@ qˡ = AquaSkyLES.CondensateField(model, T)
 qᵛ★ = AquaSkyLES.SaturationField(model, T)
 δ = Field(model.tracers.q - qᵛ★)
 
+# Output BCs
+Jθ = Oceananigans.Models.BoundaryConditionOperation(model.tracers.θ, :bottom, model)
+ρ₀ = AquaSkyLES.base_density(buoyancy) # air density at z=0
+cₚ = buoyancy.thermodynamics.dry_air.heat_capacity
+Q = Field(ρ₀ * cₚ * Jθ) # Heat flux
+
 
 function progress(sim)
     compute!(T)
     compute!(qˡ)
     compute!(δ)
+    compute!(Q)
     q = sim.model.tracers.q
     θ = sim.model.tracers.θ
     u, v, w = sim.model.velocities
@@ -157,7 +164,7 @@ end
 
 add_callback!(simulation, progress, IterationInterval(10))
 
-outputs = merge(model.velocities, model.tracers, (; T, qˡ, qᵛ★))
+outputs = merge(model.velocities, model.tracers, (; T, qˡ, qᵛ★, Q))
 
 ow = JLD2Writer(model, outputs,
                 filename = "prescribed_sst_convection.jld2",
@@ -216,3 +223,27 @@ fig
 record(fig, "prescribed_sst.mp4", 1:Nt, framerate=12) do nn
     n[] = nn
 end
+
+
+
+# Qt = FieldTimeSeries("prescribed_sst_convection.jld2", "Q")
+# #Qt_avg = Field(Average(Qt, dims = (1)))
+
+# Qt_avg = Average(Qt, dims = 1)
+# Qn = @lift Qt[$n]
+# Q_avgn = @lift Qt_avg[$n]
+
+# fig = Figure(size=(800, 400), fontsize=12)
+# axQ = Axis(fig[1, 1], ylabel="Q (W/m^2)", xlabel = "x [m]")
+# axQbar = Axis(fig[1, 2], ylabel="Q (W/m^2)", xlabel = "time")
+
+# lines!(axQ, Qn)
+# lines!(axQbar, Field(Average(Qn), dims =1))
+
+
+# fig
+
+
+# record(fig, "prescribed_sst_heat_flux.mp4", 1:Nt, framerate=12) do nn
+#     n[] = nn
+# end

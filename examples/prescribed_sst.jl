@@ -115,7 +115,7 @@ Tₛ = reference_state.θ # K
 qᵢ(x, y, z) = 1e-2 + 1e-5 * rand()
 set!(model, θ=θᵢ, q=qᵢ)
 
-simulation = Simulation(model, Δt=10, stop_time=10minutes)
+simulation = Simulation(model, Δt=10, stop_time=4hours)
 conjure_time_step_wizard!(simulation, cfl=0.7)
 
 T = AquaSkyLES.TemperatureField(model)
@@ -124,17 +124,26 @@ qᵛ★ = AquaSkyLES.SaturationField(model, T)
 δ = Field(model.tracers.q - qᵛ★)
 
 # Output BCs
+# Sensible heat flux
 Jθ = Oceananigans.Models.BoundaryConditionOperation(model.tracers.θ, :bottom, model)
 ρ₀ = AquaSkyLES.base_density(buoyancy) # air density at z=0
 cₚ = buoyancy.thermodynamics.dry_air.heat_capacity
-Q = Field(ρ₀ * cₚ * Jθ) # Heat flux
+JSH = Field(ρ₀ * cₚ * Jθ) # Heat flux [W/m^2]
+
+# Latent heat flux
+Jq = Oceananigans.Models.BoundaryConditionOperation(model.tracers.q, :bottom, model)
+Lᵛ = parameters.condensation.latent_heat
+JLH = Field(ρ₀ * Lᵛ * Jq) # [W/m^2]
+
+# Kinematic momentum flux
+Ju = Oceananigans.Models.BoundaryConditionOperation(model.velocities.u, :bottom, model) # [m^2/s^2]
+Jv = Oceananigans.Models.BoundaryConditionOperation(model.velocities.v, :bottom, model) # [m^2/s^2]
 
 
 function progress(sim)
     compute!(T)
     compute!(qˡ)
     compute!(δ)
-    compute!(Q)
     q = sim.model.tracers.q
     θ = sim.model.tracers.θ
     u, v, w = sim.model.velocities
@@ -164,7 +173,7 @@ end
 
 add_callback!(simulation, progress, IterationInterval(10))
 
-outputs = merge(model.velocities, model.tracers, (; T, qˡ, qᵛ★, Q))
+outputs = merge(model.velocities, model.tracers, (; T, qˡ, qᵛ★, JSH, JLH, Ju, Jv))
 
 ow = JLD2Writer(model, outputs,
                 filename = "prescribed_sst_convection.jld2",
@@ -184,7 +193,7 @@ Nt = length(θt)
 
 using GLMakie, Printf
 
-n = Observable(length(θt))
+n = Observable(1)
 
 θn = @lift θt[$n]
 qn = @lift qt[$n]
@@ -207,7 +216,7 @@ hmθ = heatmap!(axθ, θn, colorrange=(Tₛ, Tₛ+Δθ))
 hmq = heatmap!(axq, qn, colorrange=(0.97e-2, 1.05e-2), colormap=:magma)
 hmT = heatmap!(axT, Tn, colorrange=(Tmin, Tmax))
 hmqˡ = heatmap!(axqˡ, qˡn, colorrange=(0, 1.5e-3), colormap=:magma)
-
+ 
 # Label(fig[0, 1], "θ", tellwidth=false)
 # Label(fig[0, 2], "q", tellwidth=false)
 # Label(fig[0, 1], "θ", tellwidth=false)
@@ -225,25 +234,52 @@ record(fig, "prescribed_sst.mp4", 1:Nt, framerate=12) do nn
 end
 
 
+# surface flux timeseries
+QSH = FieldTimeSeries("prescribed_sst_convection.jld2", "JSH")
+QLH = FieldTimeSeries("prescribed_sst_convection.jld2", "JLH")
+Qu = FieldTimeSeries("prescribed_sst_convection.jld2", "Ju")
+Qv = FieldTimeSeries("prescribed_sst_convection.jld2", "Jv")
 
-# Qt = FieldTimeSeries("prescribed_sst_convection.jld2", "Q")
-# #Qt_avg = Field(Average(Qt, dims = (1)))
+QSH_av = zeros(length(QSH.times))
+QLH_av = zeros(length(QSH.times))
+ΔT = zeros(length(QSH.times))
+Qv_av = zeros(length(QSH.times))
+Qu_av = zeros(length(QSH.times))
 
-# Qt_avg = Average(Qt, dims = 1)
-# Qn = @lift Qt[$n]
-# Q_avgn = @lift Qt_avg[$n]
+for n in 1:length(QSH.times)
+    QSHn = Field(Average(QSH[n], dims=1))
+    compute!(QSHn)
+    QSH_av[n] = QSHn[1, 1, 1]
 
-# fig = Figure(size=(800, 400), fontsize=12)
-# axQ = Axis(fig[1, 1], ylabel="Q (W/m^2)", xlabel = "x [m]")
-# axQbar = Axis(fig[1, 2], ylabel="Q (W/m^2)", xlabel = "time")
+    QLHn = Field(Average(QLH[n], dims=1))
+    compute!(QLHn)
+    QLH_av[n] = QLHn[1, 1, 1]
 
-# lines!(axQ, Qn)
-# lines!(axQbar, Field(Average(Qn), dims =1))
+    Qun = Field(Average(Qu[n], dims=1))
+    compute!(Qun)
+    Qu_av[n] = Qun[1, 1, 1]
+
+    Qvn = Field(Average(Qv[n], dims=1))
+    compute!(Qvn)
+    Qv_av[n] = Qvn[1, 1, 1]
+
+    ΔT[n] = -mean(θt[:,1,2,n])+parameters.sea_surface_temperature
+
+end
 
 
-# fig
+fig = Figure(size=(600, 700), fontsize=12)
+axtau = Axis(fig[1, 1], ylabel=L"\tau/\rho_0 ~(\mathrm{m}^2/\mathrm{s}^2)", xlabel = "time [h]")
+axΔT = Axis(fig[3, 1], ylabel=L"\Delta T ~(\mathrm{K})", xlabel = "time [h]")
+axSH = Axis(fig[2, 1], ylabel=L"J~(\mathrm{W}/\mathrm{m}^2)", xlabel = "time [h]")
 
+lines!(axtau, QSH.times/3600, Qu_av, label = L"\tau_x/\rho_0")
+lines!(axtau, QSH.times/3600, Qv_av, label = L"\tau_y/\rho_0")
+lines!(axΔT, QSH.times/3600, ΔT)
+lines!(axSH, QSH.times/3600, QSH_av, label = L"J^{SH}")
+lines!(axSH, QLH.times/3600, QLH_av, label = L"J^{LH}")
 
-# record(fig, "prescribed_sst_heat_flux.mp4", 1:Nt, framerate=12) do nn
-#     n[] = nn
-# end
+fig[1, 2] = Legend(fig, axtau, framevisible = false)
+fig[2, 2] = Legend(fig, axSH, framevisible = false)
+save("Surface_fluxes.png", fig, px_per_unit = 4)
+
